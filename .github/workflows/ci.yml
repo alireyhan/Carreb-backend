@@ -1,0 +1,59 @@
+name: CI
+
+# Runs the Django test suite (incl. the security regression tests) and a migration-drift check
+# on every PR and push to main. Added 12 Jul 2026 with the security fixes.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: carreb
+          POSTGRES_PASSWORD: carreb
+          POSTGRES_DB: carreb_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U carreb"
+          --health-interval 10s --health-timeout 5s --health-retries 5
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.dev
+      SECRET_KEY: ci-test-secret-key-not-for-production
+      DEBUG: "True"
+      DATABASE_URL: postgres://carreb:carreb@localhost:5432/carreb_test
+      ALLOWED_HOSTS: "*"
+      REDIS_HOST: localhost
+      STRIPE_SECRET_KEY: sk_test_ci
+      STRIPE_WEBHOOK_SECRET: whsec_ci
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install coverage
+
+      - name: Check for missing migrations (model/migration drift)
+        run: python manage.py makemigrations --check --dry-run
+
+      - name: Run tests with coverage
+        run: |
+          coverage run manage.py test --noinput
+          coverage report
+          # Once coverage grows, gate merges on it, e.g.:
+          #   coverage report --fail-under=70

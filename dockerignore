@@ -1,0 +1,47 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Git
+.git/
+.gitignore
+
+# Environment files (NEVER ship secrets)
+.env
+.env.*
+!.env.example
+
+# Django stuff (optional depending on setup)
+db.sqlite3
+
+# Logs
+*.log
+
+# IDEs
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+
+# Tests & cache
+.pytest_cache/
+.coverage
+
+# Node (if ever used in frontend)
+node_modules/
+
+# Docker artifacts
+Dockerfile
+docker-compose*.yml
+
+# Local media/static (if generated locally)
+media/
+staticfiles/

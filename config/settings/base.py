@@ -47,8 +47,7 @@ DJANGO_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'django.contrib.sites',
-    
-
+    'django.contrib.postgres',  # TrigramSimilarity + GinIndex for the GVG type-ahead
 ]
 
 THIRD_PARTY_APPS = [

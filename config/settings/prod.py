@@ -34,13 +34,15 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 
-# Security settings
-SECURE_SSL_REDIRECT = False
-SESSION_COOKIE_SECURE = False
-CSRF_COOKIE_SECURE = False
-SECURE_HSTS_SECONDS = 0
-SECURE_HSTS_INCLUDE_SUBDOMAINS = False
-SECURE_HSTS_PRELOAD = False
+# Security settings - secure by default (SECURE_PROXY_SSL_HEADER above tells Django it is
+# behind a TLS-terminating proxy, so the redirect will not loop). Each is env-overridable in
+# case a plain-HTTP health check or a non-TLS subdomain needs it toggled off.
+SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
+SESSION_COOKIE_SECURE = env.bool('SESSION_COOKIE_SECURE', default=True)
+CSRF_COOKIE_SECURE = env.bool('CSRF_COOKIE_SECURE', default=True)
+SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=31536000)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool('SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True)
+SECURE_HSTS_PRELOAD = env.bool('SECURE_HSTS_PRELOAD', default=False)
 
 # Email settings
 EMAIL_BACKEND = env('EMAIL_BACKEND')
@@ -57,8 +59,8 @@ if SENTRY_DSN:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         integrations=[DjangoIntegration()],
-        traces_sample_rate=1.0,
-        send_default_pii=True
+        traces_sample_rate=env.float('SENTRY_TRACES_SAMPLE_RATE', default=0.1),
+        send_default_pii=False,  # SECURITY: do not ship user email / IP / request bodies to Sentry
     )
 
 

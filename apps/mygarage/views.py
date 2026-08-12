@@ -1,16 +1,18 @@
+import re
+
 from rest_framework import views, status, generics
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.utils import timezone
 from django.core.cache import cache
-from django.db import models
+from django.db import models, connection
+from django.contrib.postgres.search import TrigramSimilarity
 from django.shortcuts import get_object_or_404
 from apps.mygarage.models import (
     CurrentVehicle, GarageVehicle, GarageVehicleStatus, GarageVehicleSource,
     VehicleOverride, UserPriorityState, CoreMode, AISmartMatchRequest
 )
 from apps.vehicles.models import Vehicle, GreenVehicleGuideRecord
-from apps.vehicles.services.gvg_import import build_vehicle_like_from_gvg
 from apps.users.models import SubscriptionTier
 from apps.mygarage.serializers import (
     CurrentVehicleSerializer, GarageVehicleSerializer,
@@ -34,7 +36,7 @@ def _get_overrides(user, current_vehicle=None, garage_vehicle=None):
 def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, current_cost=None, is_current_vehicle=False):
     base_data = None
     overrides_qs = None
-
+    
     if is_current_vehicle:
         base_data = CurrentVehicleSerializer(vehicle_instance).data
         overrides_qs = VehicleOverride.objects.filter(user=user, current_vehicle=vehicle_instance)
@@ -43,7 +45,6 @@ def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, c
         priority = 3
         state = vehicle_instance.state or 'NSW'
         catalogue = vehicle_instance.vehicle_catalogue
-        gvg_record = vehicle_instance.green_vehicle_guide_record
     else:
         base_data = GarageVehicleSerializer(vehicle_instance).data
         overrides_qs = VehicleOverride.objects.filter(user=user, garage_vehicle=vehicle_instance)
@@ -53,46 +54,23 @@ def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, c
         cv = getattr(user, 'current_vehicle', None)
         state = cv.state if cv and cv.state else 'NSW'
         catalogue = vehicle_instance.vehicle_catalogue
-        gvg_record = None
-
+        
     if catalogue and base_data:
         base_data['image_url'] = catalogue.image_url
-        base_data['year'] = catalogue.year
-        base_data['make'] = catalogue.brand
-        base_data['model'] = catalogue.model
-        base_data['variant'] = catalogue.variant
-        base_data['body_style'] = catalogue.body_style
-        base_data['powertrain_type'] = catalogue.powertrain_type
-
-    # Build a vehicle-like object for rating. Prefer Carreb catalogue, then GVG record.
-    rating_vehicle = catalogue
-    if not rating_vehicle and gvg_record:
-        rating_vehicle = build_vehicle_like_from_gvg(gvg_record, state)
-        base_data = base_data or {}
-        base_data['gvg_record_id'] = str(gvg_record.id)
-        base_data['year'] = gvg_record.year
-        base_data['make'] = gvg_record.make
-        base_data['model'] = gvg_record.model
-        base_data['variant'] = gvg_record.variant
-        base_data['body_style'] = gvg_record.body_style
-        base_data['powertrain_type'] = gvg_record.powertrain_type
-        base_data['fuel_consumption_per_100km'] = gvg_record.fuel_consumption_combined_l_100km
-        base_data['tailpipe_co2_g_per_km'] = gvg_record.tailpipe_co2_g_per_km
-        base_data['source'] = 'gvg'
 
     user_inputs = {o.field_name: o.override_value for o in overrides_qs}
-
+    
     engine_data = None
-    if rating_vehicle:
+    if catalogue:
         engine_data = calculate_core_rating(
-            rating_vehicle,
-            state,
-            priority,
-            mode,
-            user_inputs,
+            catalogue, 
+            state, 
+            priority, 
+            mode, 
+            user_inputs, 
             current_vehicle_annual_cost=current_cost
         )
-
+        
     return {
         "vehicle_data": base_data,
         "engine_data": engine_data,
@@ -124,8 +102,33 @@ class CurrentVehicleView(views.APIView):
         data = serializer.validated_data
         
         vehicle_catalogue_id = data.get('vehicle_catalogue_id')
+
+        # GVG-sourced selection (prior-year vehicle from the type-ahead): enrich
+        # manual_entry_data from the record server-side so identity + the two spec
+        # fields land with provenance (source='gvg', dataset, retrieved date) and the
+        # existing manual/benchmark calc path takes over from there. User-provided
+        # manual_entry_data keys win over GVG values.
+        gvg_record_id = data.get('gvg_record_id')
+        if gvg_record_id and not vehicle_catalogue_id:
+            gvg = GreenVehicleGuideRecord.objects.get(pk=gvg_record_id)
+            gvg_fields = {
+                'brand': gvg.brand, 'model': gvg.model, 'variant': gvg.variant,
+                'year': gvg.year, 'body_style': gvg.body_style,
+                'engine_desc': gvg.engine_desc,
+                'powertrain_type': gvg.powertrain_type,
+                'fuel_consumption_per_100km': gvg.fuel_consumption_per_100km,
+                'electric_energy_wh_per_km': gvg.electric_energy_wh_per_km,
+                'tailpipe_co2_g_per_km': gvg.tailpipe_co2_g_per_km,
+                'electric_range_km': gvg.electric_range_km,
+                'source': 'gvg', 'source_dataset': gvg.source_dataset,
+                'test_cycle': gvg.test_cycle,
+                'retrieved_at': gvg.retrieved_at.isoformat() if gvg.retrieved_at else None,
+            }
+            gvg_fields = {k: v for k, v in gvg_fields.items() if v not in (None, '')}
+            data['manual_entry_data'] = {**gvg_fields, **(data.get('manual_entry_data') or {})}
+
         exists_in_garage = False
-        
+
         if vehicle_catalogue_id:
             exists_in_garage = GarageVehicle.objects.filter(
                 user=request.user,
@@ -144,7 +147,6 @@ class CurrentVehicleView(views.APIView):
             user=request.user,
             defaults={
                 'vehicle_catalogue_id': data.get('vehicle_catalogue_id'),
-                'green_vehicle_guide_record_id': data.get('green_vehicle_guide_record_id'),
                 'manual_entry_data': data.get('manual_entry_data'),
                 'purchase_date': data.get('purchase_date'),
                 'licence_plate': data.get('licence_plate'),
@@ -171,91 +173,94 @@ class CurrentVehicleView(views.APIView):
         return Response(resp)
 
 class CurrentVehicleSearchView(views.APIView):
+    """Current-vehicle type-ahead: local catalogue -> GVG table (Decision Note 8-Aug-2026).
+
+    The Carreb catalogue holds only vehicles ON SALE TODAY, so a typical current
+    vehicle (2019 Corolla, 2016 Ranger) can never match it - the GVG tier is what
+    makes this search work for prior-year cars. Rows are DB-only, never AI-generated.
+    Dedup: same (year, brand, model, variant) never shown twice; catalogue row wins.
+    (Exempt from the Patch 6.4.1 Match-List Selection Rule - exact-vehicle tool.)
+    """
     authentication_classes = []
     permission_classes = [AllowAny]
 
-    def _normalize_result(self, obj, source):
-        """Return a consistent shape for catalogue and GVG records."""
-        if source == 'carreb':
-            return {
-                "id": str(obj.id),
-                "source": "carreb",
-                "year": obj.year,
-                "make": obj.brand,
-                "model": obj.model,
-                "variant": obj.variant,
-                "body_style": obj.body_style,
-                "powertrain_type": obj.powertrain_type,
-                "fuel_consumption_per_100km": obj.fuel_consumption_per_100km,
-                "electricity_consumption_per_100km": obj.electricity_consumption_per_100km,
-                "tailpipe_co2_g_per_km": obj.tailpipe_co2_g_per_km,
-                "image_url": obj.image_url,
-                "name": str(obj),
-            }
-        return {
-            "id": str(obj.id),
-            "source": "gvg",
-            "year": obj.year,
-            "make": obj.make,
-            "model": obj.model,
-            "variant": obj.variant,
-            "body_style": obj.body_style,
-            "powertrain_type": obj.powertrain_type,
-            "fuel_consumption_per_100km": obj.fuel_consumption_combined_l_100km,
-            "electricity_consumption_per_100km": (
-                obj.electricity_consumption_wh_per_km / 10.0
-                if obj.electricity_consumption_wh_per_km else None
-            ),
-            "tailpipe_co2_g_per_km": obj.tailpipe_co2_g_per_km,
-            "image_url": None,
-            "name": f"{obj.year} {obj.make} {obj.model} {obj.variant}".strip(),
-        }
-
-    def _build_token_query(self, tokens, make_field='make', model_field='model', year_field='year'):
-        """Require every token to match make, model, or year."""
-        q = models.Q()
-        for token in tokens:
-            q &= (
-                models.Q(**{f'{make_field}__icontains': token}) |
-                models.Q(**{f'{model_field}__icontains': token}) |
-                models.Q(**{f'{year_field}__icontains': token})
-            )
-        return q
+    MAX_RESULTS = 10
+    MIN_QUERY_LEN = 3
 
     def post(self, request):
-        query = request.data.get('query', '').lower().strip()
-        if not query:
+        query = (request.data.get('query') or '').strip()
+        if len(query) < self.MIN_QUERY_LEN:
             return Response([])
 
-        tokens = query.split()
+        # Tokenise: a 4-digit token filters year; the rest match brand/model/variant.
+        year_match = re.search(r'\b(19|20)\d{2}\b', query)
+        year = int(year_match.group()) if year_match else None
+        words = [w for w in re.sub(r'\b(19|20)\d{2}\b', ' ', query).split() if w]
 
-        # 1. Carreb catalogue (new vehicles)
-        carreb_qs = Vehicle.objects.filter(
-            self._build_token_query(tokens, make_field='brand', model_field='model', year_field='year')
-        )[:10]
+        def text_filter(qs):
+            for w in words:
+                qs = qs.filter(
+                    models.Q(brand__icontains=w) |
+                    models.Q(model__icontains=w) |
+                    models.Q(variant__icontains=w)
+                )
+            return qs
 
-        # 2. GVG records (older vehicles)
-        gvg_qs = GreenVehicleGuideRecord.objects.filter(
-            self._build_token_query(tokens, make_field='make', model_field='model', year_field='year')
-        )[:10]
+        results, seen = [], set()
 
-        # 3. Merge and dedup by (year, make, model, variant). Prefer Carreb.
-        seen = set()
-        results = []
+        def identity_key(brand, model_name, variant, yr):
+            return ((brand or '').casefold(), (model_name or '').casefold(),
+                    (variant or '').casefold(), yr)
 
-        for v in carreb_qs:
-            key = (v.year, v.brand.lower(), v.model.lower(), (v.variant or '').lower())
-            if key not in seen:
+        # Tier 1 - Carreb catalogue (current new vehicles; preferred on collision)
+        cat_qs = text_filter(Vehicle.objects.all())
+        if year:
+            cat_qs = cat_qs.filter(year=year)
+        for v in cat_qs.order_by('brand', 'model', '-year')[:self.MAX_RESULTS]:
+            seen.add(identity_key(v.brand, v.model, v.variant, v.year))
+            results.append({
+                "id": v.id, "name": str(v), "source": "catalogue",
+                "brand": v.brand, "model": v.model, "variant": v.variant,
+                "year": v.year, "body_style": v.body_style,
+                "fuel_consumption_per_100km": v.fuel_consumption_per_100km,
+                "tailpipe_co2_g_per_km": v.tailpipe_co2_g_per_km,
+            })
+
+        # Tier 2 - GVG records (current + older CSVs; covers prior-year vehicles)
+        if len(results) < self.MAX_RESULTS:
+            gvg_qs = GreenVehicleGuideRecord.objects.all()
+            if connection.vendor == 'postgresql':
+                needle = ' '.join(([str(year)] if year else []) + words) or query
+                gvg_qs = gvg_qs.annotate(
+                    sim=TrigramSimilarity('search_text', needle)
+                ).filter(sim__gt=0.05).order_by('-sim', '-year')
+                if year:
+                    gvg_qs = gvg_qs.filter(year=year)
+            else:  # non-postgres fallback (local sqlite dev)
+                gvg_qs = text_filter(gvg_qs)
+                if year:
+                    gvg_qs = gvg_qs.filter(year=year)
+                gvg_qs = gvg_qs.order_by('brand', 'model', '-year')
+
+            for r in gvg_qs[:self.MAX_RESULTS * 2]:
+                if len(results) >= self.MAX_RESULTS:
+                    break
+                key = identity_key(r.brand, r.model, r.variant, r.year)
+                if key in seen:
+                    continue  # catalogue row wins (Decision Note dedup rule)
                 seen.add(key)
-                results.append(self._normalize_result(v, 'carreb'))
+                results.append({
+                    "id": f"gvg-{r.pk}", "name": str(r), "source": "gvg",
+                    "gvg_record_id": r.pk,
+                    "brand": r.brand, "model": r.model, "variant": r.variant,
+                    "year": r.year, "body_style": r.body_style,
+                    "engine_desc": r.engine_desc,
+                    "fuel_consumption_per_100km": r.fuel_consumption_per_100km,
+                    "tailpipe_co2_g_per_km": r.tailpipe_co2_g_per_km,
+                    "test_cycle": r.test_cycle, "source_dataset": r.source_dataset,
+                })
 
-        for r in gvg_qs:
-            key = (r.year, r.make.lower(), r.model.lower(), (r.variant or '').lower())
-            if key not in seen:
-                seen.add(key)
-                results.append(self._normalize_result(r, 'gvg'))
-
-        return Response(results[:15])
+        return Response(results)
 
 class CurrentVehicleDetailsView(views.APIView):
     permission_classes = [IsAuthenticated]

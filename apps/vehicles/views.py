@@ -1,6 +1,6 @@
 from rest_framework import generics, views, status, pagination
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.permissions import IsAuthenticated, AllowAny, IsAdminUser
 from django.utils import timezone
 from apps.vehicles.models import Vehicle
 from apps.vehicles.serializers import (
@@ -106,8 +106,22 @@ class VehicleVariantsView(views.APIView):
         return Response(variants)
 
 
+# D24: anonymous callers must not receive real gated dollar figures (e.g. the savings delta).
+GATED_RATING_KEYS = ('est_cost_difference',)
+
+
+def _strip_gated_for_anon(request, result):
+    user = getattr(request, 'user', None)
+    if user and getattr(user, 'is_authenticated', False):
+        return result
+    if isinstance(result, dict):
+        for key in GATED_RATING_KEYS:
+            result.pop(key, None)
+    return result
+
+
 class CoreRatingCalculateView(views.APIView):
-    permission_classes = [AllowAny] 
+    permission_classes = [AllowAny]
 
     def post(self, request):
         serializer = CoreRatingRequestSerializer(data=request.data)
@@ -143,7 +157,8 @@ class CoreRatingCalculateView(views.APIView):
             current_vehicle_annual_cost=current_cost
         )
         result['image_url'] = vehicle.image_url
-        
+        _strip_gated_for_anon(request, result)
+
         if request.user.is_authenticated and getattr(request.user, 'analytics_consent', False):
             emit_analytics_event.delay(str(request.user.id), 'vehicle_match_result_viewed', {'vehicle_id': str(vehicle.id), 'core_mode': core_mode})
             
@@ -198,6 +213,7 @@ class CoreRatingBatchView(views.APIView):
             )
             res['vehicle_id'] = str(vid)
             res['image_url'] = vehicle.image_url
+            _strip_gated_for_anon(request, res)
             results.append(res)
             
         return Response({
@@ -210,7 +226,7 @@ class CoreRatingBatchView(views.APIView):
         })
 
 class VehicleDataUploadView(views.APIView):
-    permission_classes = [AllowAny] # In a real app this should be IsAdminUser or similar
+    permission_classes = [IsAdminUser]  # SECURITY: catalogue overwrite - admins only (was AllowAny = unauthenticated overwrite)
     
     def post(self, request, *args, **kwargs):
         file_obj = request.FILES.get('file')
@@ -263,10 +279,11 @@ class CoreSearchView(views.APIView):
         
         # Deduplicate variants: keep only the cheapest variant per (brand, model, year)
         # for the requested core_mode and state to optimize processing.
+        # Spec §4: B=Pure Cost, E=COOL Choice, C=True Value, F=Full Picture (cool_choice/true_value were swapped).
         mode_map = {
             'pure_cost': 'B',
-            'cool_choice': 'C',
-            'true_value': 'E',
+            'cool_choice': 'E',
+            'true_value': 'C',
             'full_picture': 'F'
         }
         mode_letter = mode_map.get(core_mode, 'B')
@@ -334,7 +351,9 @@ class CoreSearchView(views.APIView):
         
         # Take top 10
         top_10 = results[:10]
-        
+        for _r in top_10:
+            _strip_gated_for_anon(request, _r)
+
         return Response({
             "meta": {
                 "calculated_at": timezone.now().isoformat(),

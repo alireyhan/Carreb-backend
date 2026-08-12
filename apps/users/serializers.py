@@ -34,11 +34,34 @@ class Verify2FASerializer(serializers.Serializer):
     totp_code = serializers.CharField(max_length=6, min_length=6)
 
 class SocialLoginSerializer(serializers.Serializer):
-    provider = serializers.CharField()
-    provider_id = serializers.CharField()
-    email = serializers.EmailField()
-    first_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
-    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True)
+    # SECURITY: the caller sends the provider's Firebase ID token; the server VERIFIES it
+    # and derives the identity from the verified token. A client-supplied email/provider_id
+    # is never trusted (that was an account-takeover bypass). Frontend already sends id_token.
+    id_token = serializers.CharField()
+    provider = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        from firebase_admin import auth as firebase_auth
+        try:
+            decoded = firebase_auth.verify_id_token(attrs["id_token"])
+        except Exception:
+            raise serializers.ValidationError(
+                {"id_token": "Invalid or expired social login token."}
+            )
+        email = decoded.get("email")
+        if not email:
+            raise serializers.ValidationError({"id_token": "Token did not contain an email."})
+        name = (decoded.get("name") or "").strip()
+        first, _, last = name.partition(" ")
+        # Return exactly the kwargs social_login() expects - all from the VERIFIED token.
+        return {
+            "provider": (decoded.get("firebase", {}) or {}).get("sign_in_provider")
+                        or attrs.get("provider") or "firebase",
+            "provider_id": decoded.get("uid"),
+            "email": email,
+            "first_name": decoded.get("given_name") or first or "",
+            "last_name": decoded.get("family_name") or last or "",
+        }
 
 class Confirm2FASerializer(serializers.Serializer):
     totp_code = serializers.CharField(max_length=6, min_length=6)
