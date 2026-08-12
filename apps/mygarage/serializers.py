@@ -5,7 +5,7 @@ from apps.vehicles.models import Vehicle
 class CurrentVehicleSerializer(serializers.ModelSerializer):
     class Meta:
         model = CurrentVehicle
-        fields = ['id', 'vehicle_catalogue_id', 'green_vehicle_guide_record_id', 'manual_entry_data', 'purchase_date', 'licence_plate', 'odometer_reading', 'state', 'created_at', 'updated_at']
+        fields = ['id', 'vehicle_catalogue_id', 'manual_entry_data', 'purchase_date', 'licence_plate', 'odometer_reading', 'state', 'created_at', 'updated_at']
 
 class GarageVehicleSerializer(serializers.ModelSerializer):
     class Meta:
@@ -25,7 +25,6 @@ class UserPriorityStateSerializer(serializers.ModelSerializer):
 
 class CurrentVehicleCreateSerializer(serializers.Serializer):
     vehicle_catalogue_id = serializers.UUIDField(required=False, allow_null=True)
-    green_vehicle_guide_record_id = serializers.UUIDField(required=False, allow_null=True)
     manual_entry_data = serializers.JSONField(required=False, allow_null=True)
     purchase_date = serializers.DateField(required=False, allow_null=True)
     licence_plate = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -36,19 +35,6 @@ class CurrentVehicleCreateSerializer(serializers.Serializer):
         if value and not Vehicle.objects.filter(id=value).exists():
             raise serializers.ValidationError("Vehicle with this ID does not exist in the catalogue.")
         return value
-
-    def validate_green_vehicle_guide_record_id(self, value):
-        from apps.vehicles.models import GreenVehicleGuideRecord
-        if value and not GreenVehicleGuideRecord.objects.filter(id=value).exists():
-            raise serializers.ValidationError("Green Vehicle Guide record with this ID does not exist.")
-        return value
-
-    def validate(self, data):
-        if data.get('vehicle_catalogue_id') and data.get('green_vehicle_guide_record_id'):
-            raise serializers.ValidationError(
-                "Provide either vehicle_catalogue_id or green_vehicle_guide_record_id, not both."
-            )
-        return data
 
 class GarageVehicleCreateSerializer(serializers.Serializer):
     vehicle_catalogue_id = serializers.UUIDField()

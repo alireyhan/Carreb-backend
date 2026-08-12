@@ -91,10 +91,9 @@ def _score_and_pick_best(candidates, state: str, priority_slider: int) -> Option
 
 # ── Match Logic ──────────────────────────────────────────────────────────────
 
-def match_vehicle_for_wizard(session: FreeMatchSession) -> tuple[Optional[Vehicle], bool]:
+def match_vehicle_for_wizard(session: FreeMatchSession) -> Optional[Vehicle]:
     """
     Run the Free Match Wizard matching algorithm.
-    Returns a tuple of (vehicle, is_suggested).
     """
     state = session.state or WIZARD_DEFAULT_STATE
     priority_slider = PRIORITY_TO_SLIDER.get(session.priority, 3)
@@ -105,7 +104,7 @@ def match_vehicle_for_wizard(session: FreeMatchSession) -> tuple[Optional[Vehicl
     if candidates:
         vehicle = _score_and_pick_best(candidates, state, priority_slider)
         if vehicle:
-            return vehicle, False
+            return vehicle
 
     # ── Attempt 1.5: relax budget and nice-to-have features ───────────────────
     logger.info(
@@ -118,7 +117,7 @@ def match_vehicle_for_wizard(session: FreeMatchSession) -> tuple[Optional[Vehicl
     if candidates:
         vehicle = _score_and_pick_best(candidates, state, priority_slider)
         if vehicle:
-            return vehicle, True
+            return vehicle
 
     # ── Attempt 2: fuel only (relax body style, seating, etc) ──────────────────────────
     logger.info(
@@ -130,7 +129,7 @@ def match_vehicle_for_wizard(session: FreeMatchSession) -> tuple[Optional[Vehicl
     if candidates:
         vehicle = _score_and_pick_best(candidates, state, priority_slider)
         if vehicle:
-            return vehicle, True
+            return vehicle
 
     # ── Attempt 3: no filters (relax fuel type too) ──────────────────────
     logger.info(
@@ -146,12 +145,12 @@ def match_vehicle_for_wizard(session: FreeMatchSession) -> tuple[Optional[Vehicl
     if not vehicle:
         raise RuntimeError("CORE Rating Engine returned no scorable vehicle.")
 
-    return vehicle, True
+    return vehicle
 
 
 # ── Response Builders ────────────────────────────────────────────────────────
 
-def build_match_response(vehicle: Vehicle, session: FreeMatchSession, is_suggested: bool = False) -> dict:
+def build_match_response(vehicle: Vehicle, session: FreeMatchSession) -> dict:
     from django.utils import timezone
     
     state = session.state or WIZARD_DEFAULT_STATE
@@ -183,7 +182,6 @@ def build_match_response(vehicle: Vehicle, session: FreeMatchSession, is_suggest
             "annual_running_cost_display": _format_cents(annual_cost_cents),
             "co2_g_per_km": co2,
             "is_estimate": True,
-            **({"is_suggested": True} if is_suggested else {}),
             "resale_value_5yr_estimate": {"locked": True, "value": None},
             "est_cost_difference": {"locked": True, "value": None},
             "driveaway_price_estimate": {"locked": True, "value": None},
@@ -310,14 +308,14 @@ def process_free_match(payload: dict) -> dict:
         
     session.save()
     
-    vehicle, is_suggested = match_vehicle_for_wizard(session)
+    vehicle = match_vehicle_for_wizard(session)
     if not vehicle:
         raise RuntimeError("No match could be found.")
         
     session.matched_vehicle = vehicle
     session.save(update_fields=["matched_vehicle"])
     
-    return build_match_response(vehicle, session, is_suggested)
+    return build_match_response(vehicle, session)
 
 
 @transaction.atomic

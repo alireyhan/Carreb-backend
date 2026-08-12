@@ -8,13 +8,6 @@ class CurrentVehicle(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='current_vehicle')
     vehicle_catalogue = models.ForeignKey(Vehicle, on_delete=models.SET_NULL, null=True, blank=True, related_name='current_vehicles')
-    green_vehicle_guide_record = models.ForeignKey(
-        'vehicles.GreenVehicleGuideRecord',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='current_vehicles'
-    )
     manual_entry_data = models.JSONField(null=True, blank=True)
     purchase_date = models.DateField(null=True, blank=True)
     licence_plate = models.CharField(max_length=255, null=True, blank=True) # Encrypted at service level

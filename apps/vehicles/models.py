@@ -16,130 +16,6 @@ class TestCycle(models.TextChoices):
     ADR = 'ADR', 'ADR'
     NEDC = 'NEDC', 'NEDC'
 
-
-class DataSource(models.Model):
-    """
-    Registry for external data sources used to substantiate vehicle specs.
-    """
-    code = models.CharField(max_length=50, unique=True)
-    name = models.CharField(max_length=255)
-    url = models.URLField(blank=True)
-    dataset_type = models.CharField(max_length=50, blank=True)
-    retrieved_at = models.DateTimeField(null=True, blank=True)
-    archived_file = models.FileField(upload_to='data/source_archives/', blank=True, null=True)
-    metadata = models.JSONField(default=dict, blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['code']
-
-    def __str__(self):
-        return f"{self.code} — {self.name}"
-
-
-class CategoryCostDefault(models.Model):
-    """
-    Per-FCAI-category, per-state default cost components used when a GVG
-    record does not have a matching Carreb catalogue row.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    fcai_category = models.CharField(max_length=100)
-    fcai_broad = models.CharField(max_length=100, blank=True)
-    state = models.CharField(max_length=10)
-    annual_km = models.IntegerField(default=13300)
-
-    ctp_pa = models.IntegerField(null=True, blank=True)               # cents
-    comprehensive_pa = models.IntegerField(null=True, blank=True)     # cents
-    registration_pa = models.IntegerField(null=True, blank=True)      # cents
-    maintenance_pa = models.IntegerField(null=True, blank=True)         # cents p.a.
-    tyre_cost_pa = models.IntegerField(null=True, blank=True)          # cents p.a.
-    fuel_cost_pa = models.IntegerField(null=True, blank=True)         # cents p.a.
-    electricity_cost_pa = models.IntegerField(null=True, blank=True)  # cents p.a.
-    ev_levy_pa = models.IntegerField(null=True, blank=True)            # cents p.a.
-    components_sum_pa = models.IntegerField(null=True, blank=True)    # cents p.a.
-
-    servicing_5yr_estimate = models.IntegerField(null=True, blank=True)
-    tyre_replacement_estimate = models.IntegerField(null=True, blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['fcai_category', 'state']
-        unique_together = ['fcai_category', 'state']
-
-    def __str__(self):
-        return f"{self.fcai_category} — {self.state}"
-
-
-class GreenVehicleGuideRecord(models.Model):
-    """
-    Imported GVG / Fuel Consumption Guide data for prior-year current-vehicle lookup.
-    """
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    source = models.ForeignKey(DataSource, on_delete=models.SET_NULL, null=True, blank=True)
-
-    # Identity
-    make = models.CharField(max_length=100)
-    model = models.CharField(max_length=100)
-    year = models.IntegerField()
-    variant = models.CharField(max_length=255, blank=True)
-
-    # Specs
-    body_style = models.CharField(max_length=100, blank=True)
-    fcai_category = models.CharField(max_length=100, blank=True)
-    fcai_broad = models.CharField(max_length=100, blank=True)
-    powertrain_type = models.CharField(max_length=50, choices=PowertrainType.choices, blank=True)
-    fuel_type_raw = models.CharField(max_length=100, blank=True)
-
-    engine_l = models.FloatField(null=True, blank=True)
-    battery_kwh = models.FloatField(null=True, blank=True)
-    num_seats = models.IntegerField(null=True, blank=True)
-    transmission = models.CharField(max_length=100, blank=True)
-
-    # Consumption / emissions
-    fuel_consumption_combined_l_100km = models.FloatField(null=True, blank=True)
-    fuel_consumption_urban_l_100km = models.FloatField(null=True, blank=True)
-    fuel_consumption_extra_urban_l_100km = models.FloatField(null=True, blank=True)
-    electricity_consumption_wh_per_km = models.FloatField(null=True, blank=True)
-    electric_range_km = models.FloatField(null=True, blank=True)
-    tailpipe_co2_g_per_km = models.FloatField(null=True, blank=True)
-
-    # Cost discipline
-    annual_fuel_cost = models.IntegerField(null=True, blank=True)  # cents
-    driveaway_price_estimate = models.IntegerField(null=True, blank=True)  # cents
-    insurance_estimate_by_state = models.JSONField(default=dict, blank=True)
-    ctp_by_state = models.JSONField(default=dict, blank=True)
-    registration_by_state = models.JSONField(default=dict, blank=True)
-    servicing_5yr_estimate = models.IntegerField(null=True, blank=True)  # cents
-    tyre_replacement_estimate = models.IntegerField(null=True, blank=True)  # cents
-    resale_value_5yr_estimate = models.IntegerField(null=True, blank=True)  # cents
-    total_5yr_cost_of_ownership_by_state = models.JSONField(default=dict, blank=True)
-
-    # Source discipline
-    is_current_model = models.BooleanField(null=True, blank=True)
-    model_end_year = models.IntegerField(null=True, blank=True)
-    test_cycle = models.CharField(max_length=50, blank=True)
-    source_dataset = models.CharField(max_length=50, blank=True)
-    raw_data = models.JSONField(default=dict, blank=True)
-
-    imported_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ['make', 'model', 'year', 'variant']
-        indexes = [
-            models.Index(fields=['make', 'model', 'year']),
-            models.Index(fields=['powertrain_type']),
-            models.Index(fields=['fcai_category']),
-        ]
-
-    def __str__(self):
-        return f"{self.year} {self.make} {self.model} {self.variant}"
-
-
 class Vehicle(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     
@@ -198,6 +74,12 @@ class Vehicle(models.Model):
 
     class Meta:
         ordering = ['brand', 'model', 'year', 'variant']
+        indexes = [
+            models.Index(fields=['brand', 'model', 'year', 'variant'], name='vehicle_identity_idx'),
+            models.Index(fields=['brand', 'model'], name='vehicle_brand_model_idx'),
+            models.Index(fields=['fcai_category'], name='vehicle_fcai_category_idx'),
+            models.Index(fields=['powertrain_type'], name='vehicle_powertrain_idx'),
+        ]
 
     def __str__(self):
         return f"{self.year} {self.brand} {self.model} {self.variant}"

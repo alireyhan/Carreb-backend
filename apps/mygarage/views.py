@@ -9,8 +9,7 @@ from apps.mygarage.models import (
     CurrentVehicle, GarageVehicle, GarageVehicleStatus, GarageVehicleSource,
     VehicleOverride, UserPriorityState, CoreMode, AISmartMatchRequest
 )
-from apps.vehicles.models import Vehicle, GreenVehicleGuideRecord
-from apps.vehicles.services.gvg_import import build_vehicle_like_from_gvg
+from apps.vehicles.models import Vehicle
 from apps.users.models import SubscriptionTier
 from apps.mygarage.serializers import (
     CurrentVehicleSerializer, GarageVehicleSerializer,
@@ -34,7 +33,7 @@ def _get_overrides(user, current_vehicle=None, garage_vehicle=None):
 def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, current_cost=None, is_current_vehicle=False):
     base_data = None
     overrides_qs = None
-
+    
     if is_current_vehicle:
         base_data = CurrentVehicleSerializer(vehicle_instance).data
         overrides_qs = VehicleOverride.objects.filter(user=user, current_vehicle=vehicle_instance)
@@ -43,7 +42,6 @@ def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, c
         priority = 3
         state = vehicle_instance.state or 'NSW'
         catalogue = vehicle_instance.vehicle_catalogue
-        gvg_record = vehicle_instance.green_vehicle_guide_record
     else:
         base_data = GarageVehicleSerializer(vehicle_instance).data
         overrides_qs = VehicleOverride.objects.filter(user=user, garage_vehicle=vehicle_instance)
@@ -53,46 +51,23 @@ def _build_calculated_vehicle_response(user, vehicle_instance, priority_state, c
         cv = getattr(user, 'current_vehicle', None)
         state = cv.state if cv and cv.state else 'NSW'
         catalogue = vehicle_instance.vehicle_catalogue
-        gvg_record = None
-
+        
     if catalogue and base_data:
         base_data['image_url'] = catalogue.image_url
-        base_data['year'] = catalogue.year
-        base_data['make'] = catalogue.brand
-        base_data['model'] = catalogue.model
-        base_data['variant'] = catalogue.variant
-        base_data['body_style'] = catalogue.body_style
-        base_data['powertrain_type'] = catalogue.powertrain_type
-
-    # Build a vehicle-like object for rating. Prefer Carreb catalogue, then GVG record.
-    rating_vehicle = catalogue
-    if not rating_vehicle and gvg_record:
-        rating_vehicle = build_vehicle_like_from_gvg(gvg_record, state)
-        base_data = base_data or {}
-        base_data['gvg_record_id'] = str(gvg_record.id)
-        base_data['year'] = gvg_record.year
-        base_data['make'] = gvg_record.make
-        base_data['model'] = gvg_record.model
-        base_data['variant'] = gvg_record.variant
-        base_data['body_style'] = gvg_record.body_style
-        base_data['powertrain_type'] = gvg_record.powertrain_type
-        base_data['fuel_consumption_per_100km'] = gvg_record.fuel_consumption_combined_l_100km
-        base_data['tailpipe_co2_g_per_km'] = gvg_record.tailpipe_co2_g_per_km
-        base_data['source'] = 'gvg'
 
     user_inputs = {o.field_name: o.override_value for o in overrides_qs}
-
+    
     engine_data = None
-    if rating_vehicle:
+    if catalogue:
         engine_data = calculate_core_rating(
-            rating_vehicle,
-            state,
-            priority,
-            mode,
-            user_inputs,
+            catalogue, 
+            state, 
+            priority, 
+            mode, 
+            user_inputs, 
             current_vehicle_annual_cost=current_cost
         )
-
+        
     return {
         "vehicle_data": base_data,
         "engine_data": engine_data,
@@ -144,7 +119,6 @@ class CurrentVehicleView(views.APIView):
             user=request.user,
             defaults={
                 'vehicle_catalogue_id': data.get('vehicle_catalogue_id'),
-                'green_vehicle_guide_record_id': data.get('green_vehicle_guide_record_id'),
                 'manual_entry_data': data.get('manual_entry_data'),
                 'purchase_date': data.get('purchase_date'),
                 'licence_plate': data.get('licence_plate'),
@@ -173,89 +147,18 @@ class CurrentVehicleView(views.APIView):
 class CurrentVehicleSearchView(views.APIView):
     authentication_classes = []
     permission_classes = [AllowAny]
-
-    def _normalize_result(self, obj, source):
-        """Return a consistent shape for catalogue and GVG records."""
-        if source == 'carreb':
-            return {
-                "id": str(obj.id),
-                "source": "carreb",
-                "year": obj.year,
-                "make": obj.brand,
-                "model": obj.model,
-                "variant": obj.variant,
-                "body_style": obj.body_style,
-                "powertrain_type": obj.powertrain_type,
-                "fuel_consumption_per_100km": obj.fuel_consumption_per_100km,
-                "electricity_consumption_per_100km": obj.electricity_consumption_per_100km,
-                "tailpipe_co2_g_per_km": obj.tailpipe_co2_g_per_km,
-                "image_url": obj.image_url,
-                "name": str(obj),
-            }
-        return {
-            "id": str(obj.id),
-            "source": "gvg",
-            "year": obj.year,
-            "make": obj.make,
-            "model": obj.model,
-            "variant": obj.variant,
-            "body_style": obj.body_style,
-            "powertrain_type": obj.powertrain_type,
-            "fuel_consumption_per_100km": obj.fuel_consumption_combined_l_100km,
-            "electricity_consumption_per_100km": (
-                obj.electricity_consumption_wh_per_km / 10.0
-                if obj.electricity_consumption_wh_per_km else None
-            ),
-            "tailpipe_co2_g_per_km": obj.tailpipe_co2_g_per_km,
-            "image_url": None,
-            "name": f"{obj.year} {obj.make} {obj.model} {obj.variant}".strip(),
-        }
-
-    def _build_token_query(self, tokens, make_field='make', model_field='model', year_field='year'):
-        """Require every token to match make, model, or year."""
-        q = models.Q()
-        for token in tokens:
-            q &= (
-                models.Q(**{f'{make_field}__icontains': token}) |
-                models.Q(**{f'{model_field}__icontains': token}) |
-                models.Q(**{f'{year_field}__icontains': token})
-            )
-        return q
-
+    
     def post(self, request):
-        query = request.data.get('query', '').lower().strip()
+        query = request.data.get('query', '').lower()
         if not query:
             return Response([])
-
-        tokens = query.split()
-
-        # 1. Carreb catalogue (new vehicles)
-        carreb_qs = Vehicle.objects.filter(
-            self._build_token_query(tokens, make_field='brand', model_field='model', year_field='year')
+        # Basic text search on brand, model, year
+        qs = Vehicle.objects.filter(
+            models.Q(brand__icontains=query) | 
+            models.Q(model__icontains=query) |
+            models.Q(year__icontains=query)
         )[:10]
-
-        # 2. GVG records (older vehicles)
-        gvg_qs = GreenVehicleGuideRecord.objects.filter(
-            self._build_token_query(tokens, make_field='make', model_field='model', year_field='year')
-        )[:10]
-
-        # 3. Merge and dedup by (year, make, model, variant). Prefer Carreb.
-        seen = set()
-        results = []
-
-        for v in carreb_qs:
-            key = (v.year, v.brand.lower(), v.model.lower(), (v.variant or '').lower())
-            if key not in seen:
-                seen.add(key)
-                results.append(self._normalize_result(v, 'carreb'))
-
-        for r in gvg_qs:
-            key = (r.year, r.make.lower(), r.model.lower(), (r.variant or '').lower())
-            if key not in seen:
-                seen.add(key)
-                results.append(self._normalize_result(r, 'gvg'))
-
-        return Response(results[:15])
+        return Response([{"id": v.id, "name": str(v)} for v in qs])
 
 class CurrentVehicleDetailsView(views.APIView):
     permission_classes = [IsAuthenticated]

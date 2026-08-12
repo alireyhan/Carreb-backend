@@ -12,9 +12,28 @@ class VehicleListSerializer(serializers.ModelSerializer):
         ]
 
 class VehicleDetailSerializer(serializers.ModelSerializer):
+    # D24: an anonymous request must receive NO real gated dollar value. These premium
+    # cost/resale fields are stripped unless the caller is authenticated.
+    GATED_FIELDS = {
+        'driveaway_price_by_state', 'insurance_estimate_by_state', 'ctp_by_state',
+        'registration_by_state', 'servicing_5yr_estimate', 'tyre_replacement_estimate',
+        'resale_value_5yr_estimate', 'total_5yr_cost_of_ownership_by_state',
+        'fuel_cost_by_state', 'electricity_cost_by_state', 'ev_levy_by_state',
+        'base_coo_by_state', 'components_sum_by_state', 'mode_data_by_state',
+    }
+
     class Meta:
         model = Vehicle
         fields = '__all__'
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        if not (user and getattr(user, 'is_authenticated', False)):
+            for field in self.GATED_FIELDS:
+                data.pop(field, None)
+        return data
 
 class CoreRatingRequestSerializer(serializers.Serializer):
     vehicle_id = serializers.UUIDField()

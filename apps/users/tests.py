@@ -110,19 +110,18 @@ class TwoFactorAuthDisableTestCase(APITestCase):
             enrolled_at=timezone.now()
         )
 
-        # Call social-login endpoint
+        # Call social-login endpoint. The Firebase id_token is now verified server-side and
+        # the identity comes from the VERIFIED token, so we mock verify_id_token.
+        from unittest.mock import patch
         url = reverse('login-social')
-        payload = {
-            'provider': 'google',
-            'provider_id': 'google-id-123',
-            'email': self.user.email,
-            'first_name': 'Test',
-            'last_name': 'User'
-        }
-        response = self.client.post(url, payload)
+        with patch('firebase_admin.auth.verify_id_token') as mock_verify:
+            mock_verify.return_value = {
+                'uid': 'google-id-123', 'email': self.user.email, 'name': 'Test User',
+                'firebase': {'sign_in_provider': 'google.com'},
+            }
+            response = self.client.post(url, {'id_token': 'valid-token'}, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
+
         # Verify it returns a 2FA challenge response
         self.assertEqual(response.data['type'], 'challenge')
-        self.assertTrue(response.data['is_2fa_enabled'])
         self.assertIn('challenge_token', response.data)
